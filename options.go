@@ -449,6 +449,12 @@ func IgnoreFields(regexes ...string) Option {
 // ConfigurationLoader is a function that builds a resolver from a file.
 type ConfigurationLoader func(r io.Reader) (Resolver, error)
 
+// configFileResolver tags a resolver created from a Configuration() file so
+// that profile precedence can place it below profile-provided values.
+type configFileResolver struct {
+	Resolver
+}
+
 // Configuration provides Kong with support for loading defaults from a set of configuration files.
 //
 // Paths will be opened in order, and "loader" will be used to provide a Resolver which is registered with Kong.
@@ -475,7 +481,7 @@ func Configuration(loader ConfigurationLoader, paths ...string) Option {
 				return fmt.Errorf("%s: %v", path, err)
 			}
 			if resolver != nil {
-				k.resolvers = append(k.resolvers, resolver)
+				k.resolvers = append(k.resolvers, &configFileResolver{Resolver: resolver})
 			}
 		}
 		return nil
@@ -562,6 +568,51 @@ func DefaultEnvars(prefix string) Option {
 func FlagNamer(namer func(fieldName string) string) Option {
 	return OptionFunc(func(k *Kong) error {
 		k.flagNamer = namer
+		return nil
+	})
+}
+
+// Profiles installs a parsed set of named configuration profiles.
+//
+// The set is fully validated against the command tree after it is built; New
+// returns an error describing unknown profiles, inheritance cycles, unknown
+// fields or command scopes, type or enum mismatches and xor conflicts.
+//
+// A profile is not used until one is selected with Profile(),
+// Kong.SelectProfile() or the document's "default_profile".
+func Profiles(set *ProfileSet) Option {
+	return OptionFunc(func(k *Kong) error {
+		if k.profiles == nil {
+			k.profiles = newProfileHub()
+		}
+		k.postBuildOptions = append(k.postBuildOptions, OptionFunc(func(k *Kong) error {
+			return k.ReplaceProfiles(set)
+		}))
+		return nil
+	})
+}
+
+// ProfilesReader parses a JSON profile document from r and installs it.
+func ProfilesReader(r io.Reader) Option {
+	return OptionFunc(func(k *Kong) error {
+		set, err := ParseProfiles(r)
+		if err != nil {
+			return err
+		}
+		return Profiles(set).Apply(k)
+	})
+}
+
+// Profile selects a profile by name before parsing. It is equivalent to
+// calling Kong.SelectProfile() after New(), but usable as an option.
+func Profile(name string) Option {
+	return OptionFunc(func(k *Kong) error {
+		if k.profiles == nil {
+			k.profiles = newProfileHub()
+		}
+		k.postBuildOptions = append(k.postBuildOptions, OptionFunc(func(k *Kong) error {
+			return k.SelectProfile(name)
+		}))
 		return nil
 	})
 }

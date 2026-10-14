@@ -53,6 +53,7 @@ type Kong struct {
 	bindings     bindings
 	loader       ConfigurationLoader
 	resolvers    []Resolver
+	profiles     *profileHub
 	registry     *Registry
 	ignoreFields []*regexp.Regexp
 
@@ -488,6 +489,43 @@ func (k *Kong) FatalIfErrorf(err error, args ...any) {
 	}
 	k.Errorf("%s", msg)
 	k.Exit(exitCodeFromError(err))
+}
+
+// ReplaceProfiles fully validates set against the command tree and atomically
+// replaces the installed profile set. If validation fails the previously
+// installed set remains available and in use.
+func (k *Kong) ReplaceProfiles(set *ProfileSet) error {
+	if k.profiles == nil {
+		k.profiles = newProfileHub()
+	}
+	compiled, err := compileProfiles(set.doc, k.Model)
+	if err != nil {
+		return err
+	}
+	k.profiles.install(compiled)
+	return nil
+}
+
+// SelectProfile selects the named profile for subsequent Parse() calls. It
+// must be called before parsing and returns a *ProfileError if the profile is
+// not part of the installed set.
+func (k *Kong) SelectProfile(name string) error {
+	if k.profiles == nil {
+		k.profiles = newProfileHub()
+	}
+	return k.profiles.selectProfile(name)
+}
+
+// ActiveProfile returns the explicitly selected profile name, or "" if no
+// profile is selected (a "default_profile" from the document is not reported
+// here; inspect Context.ProfileExplanation() during a parse instead).
+func (k *Kong) ActiveProfile() string {
+	if k.profiles == nil {
+		return ""
+	}
+	k.profiles.mu.RLock()
+	defer k.profiles.mu.RUnlock()
+	return k.profiles.selected
 }
 
 // LoadConfig from path using the loader configured via Configuration(loader).

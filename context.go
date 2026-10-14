@@ -93,6 +93,59 @@ type Context struct {
 	resolvers     []Resolver // Extra context-specific resolvers.
 	scan          *Scanner
 	lastWinsPeers map[*Flag][]*Flag // Other members of each flag's lastwins group.
+
+	profile            *profileResolver    // Active profile resolver for this parse.
+	profileExplanation *ProfileExplanation // Cached explanation after resolution.
+	resolverSources    map[*Flag]string    // Winning resolver source per resolved flag.
+}
+
+// Resolver source labels used by ProfileExplanation.
+const (
+	sourceConfig  = "config"
+	sourceProfile = "profile"
+	sourceGlobal  = "global"
+	sourceContext = "context"
+)
+
+// resolverEntry pairs a Resolver with its precedence source label.
+type resolverEntry struct {
+	resolver Resolver
+	source   string
+}
+
+// hasResolverSources reports whether any resolver source (registered
+// resolvers, context resolvers, or a selected profile) is available.
+func (c *Context) hasResolverSources() bool {
+	if len(c.Kong.resolvers) != 0 || len(c.resolvers) != 0 {
+		return true
+	}
+	if c.Kong.profiles == nil {
+		return false
+	}
+	_, selected, _ := c.Kong.profiles.activeSelection()
+	return selected != ""
+}
+
+// profileState returns the per-context profile resolver when a profile is
+// installed and selected (explicitly or through default_profile).
+func (c *Context) profileState() *profileResolver {
+	if c.profile != nil {
+		return c.profile
+	}
+	if c.Kong.profiles == nil {
+		return nil
+	}
+	compiled, selected, defaultSelected := c.Kong.profiles.activeSelection()
+	if compiled == nil || selected == "" {
+		return nil
+	}
+	resolver, err := newProfileResolver(compiled, selected, defaultSelected)
+	if err != nil {
+		return nil
+	}
+	c.profile = resolver
+	c.resolverSources = map[*Flag]string{}
+	return c.profile
 }
 
 // Trace path of "args" through the grammar tree.
@@ -109,10 +162,11 @@ func Trace(k *Kong, args []string) (*Context, error) {
 		Path: []*Path{
 			{App: k.Model, Flags: k.Model.Flags, remainder: s.PeekAll()},
 		},
-		values:        map[*Value]reflect.Value{},
-		scan:          s,
-		bindings:      bindings{},
-		lastWinsPeers: lastWinsPeers(k.Model.Node),
+		values:          map[*Value]reflect.Value{},
+		scan:            s,
+		bindings:        bindings{},
+		lastWinsPeers:   lastWinsPeers(k.Model.Node),
+		resolverSources: map[*Flag]string{},
 	}
 	c.Error = c.trace(c.Model.Node)
 	if c.Error == nil {
@@ -373,6 +427,9 @@ func (c *Context) Validate() error { //nolint: gocyclo
 		return err
 	}
 	if err := checkXorDuplicatedAndAndMissing(c.Path); err != nil {
+		if detail := c.profileConflictDetail(); detail != "" {
+			return fmt.Errorf("%w\n%s", err, detail)
+		}
 		return err
 	}
 
@@ -451,7 +508,7 @@ func (c *Context) Reset() error {
 			value.Target.Set(reflect.Zero(value.Target.Type()))
 			err = nil
 		}
-		if err != nil && len(c.combineResolvers()) != 0 {
+		if err != nil && c.hasResolverSources() {
 			// A resolver may supply a valid value after defaults are reset.
 			// Keep the error so Resolve can return it if no value overrides it.
 			c.resetErrors[value] = err
@@ -711,8 +768,8 @@ func (c *Context) maybeSelectDefault(flags []*Flag, node *Node) error {
 
 // Resolve walks through the traced path, applying resolvers to any unset flags.
 func (c *Context) Resolve() error {
-	resolvers := c.combineResolvers()
-	if len(resolvers) == 0 {
+	entries := c.combineResolverEntries()
+	if len(entries) == 0 {
 		return nil
 	}
 
@@ -726,8 +783,9 @@ func (c *Context) Resolve() error {
 
 			// Pick the last resolved value.
 			var selected any
-			for _, resolver := range resolvers {
-				s, err := resolver.Resolve(c, path, flag)
+			var winnerSource string
+			for _, entry := range entries {
+				s, err := entry.resolver.Resolve(c, path, flag)
 				if err != nil {
 					return fmt.Errorf("%s: %w", flag.ShortSummary(), err)
 				}
@@ -735,11 +793,13 @@ func (c *Context) Resolve() error {
 					continue
 				}
 				selected = s
+				winnerSource = entry.source
 			}
 
 			if selected == nil {
 				continue
 			}
+			c.resolverSources[flag] = winnerSource
 
 			scan := Scan().PushTyped(selected, FlagValueToken)
 			delete(c.values, flag.Value)
@@ -755,6 +815,9 @@ func (c *Context) Resolve() error {
 		}
 	}
 	c.Path = append(c.Path, inserted...)
+	if c.profile != nil {
+		c.profileExplanation = c.profile.explain(c)
+	}
 	for value, err := range c.resetErrors {
 		if _, ok := c.values[value]; !ok {
 			return err
@@ -764,11 +827,57 @@ func (c *Context) Resolve() error {
 }
 
 // Combine application-level resolvers and context resolvers.
+//
+// When a profile is selected the order reflects explicit profile precedence
+// (configuration files < profile < registered resolvers < context
+// resolvers); otherwise Kong's historical registration order is preserved.
 func (c *Context) combineResolvers() []Resolver {
-	resolvers := []Resolver{}
-	resolvers = append(resolvers, c.Kong.resolvers...)
-	resolvers = append(resolvers, c.resolvers...)
+	entries := c.combineResolverEntries()
+	resolvers := make([]Resolver, len(entries))
+	for i, entry := range entries {
+		resolvers[i] = entry.resolver
+	}
 	return resolvers
+}
+
+func (c *Context) combineResolverEntries() []resolverEntry {
+	entries := make([]resolverEntry, 0, len(c.Kong.resolvers)+len(c.resolvers)+1)
+	profiles := c.profileState()
+	if profiles == nil {
+		for _, resolver := range c.Kong.resolvers {
+			entries = append(entries, resolverEntry{resolver: resolver, source: appResolverSource(resolver)})
+		}
+		for _, resolver := range c.resolvers {
+			entries = append(entries, resolverEntry{resolver: resolver, source: sourceContext})
+		}
+		return entries
+	}
+	configEntries := []resolverEntry{}
+	globalEntries := []resolverEntry{}
+	for _, resolver := range c.Kong.resolvers {
+		entry := resolverEntry{resolver: resolver, source: appResolverSource(resolver)}
+		if file, ok := resolver.(*configFileResolver); ok {
+			entry.resolver = file.Resolver
+			entry.source = sourceConfig
+			configEntries = append(configEntries, entry)
+			continue
+		}
+		globalEntries = append(globalEntries, entry)
+	}
+	entries = append(entries, configEntries...)
+	entries = append(entries, resolverEntry{resolver: profiles, source: sourceProfile})
+	entries = append(entries, globalEntries...)
+	for _, resolver := range c.resolvers {
+		entries = append(entries, resolverEntry{resolver: resolver, source: sourceContext})
+	}
+	return entries
+}
+
+func appResolverSource(resolver Resolver) string {
+	if _, ok := resolver.(*configFileResolver); ok {
+		return sourceConfig
+	}
+	return sourceGlobal
 }
 
 func (c *Context) getValue(value *Value) reflect.Value {
