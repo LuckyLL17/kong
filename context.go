@@ -93,6 +93,14 @@ type Context struct {
 	resolvers     []Resolver // Extra context-specific resolvers.
 	scan          *Scanner
 	lastWinsPeers map[*Flag][]*Flag // Other members of each flag's lastwins group.
+
+	// resolveObserver, when set, is notified with the raw resolver result selected for
+	// each flag considered during Resolve. It is used by two-phase parsing previews;
+	// nil during a normal Parse.
+	resolveObserver func(flag *Flag, selected any)
+	// hookFilter, when set, suppresses hooks matching a path element and hook name. It
+	// is used by two-phase parsing previews; nil during a normal Parse.
+	hookFilter func(trace *Path, hook string) bool
 }
 
 // Trace path of "args" through the grammar tree.
@@ -712,7 +720,7 @@ func (c *Context) maybeSelectDefault(flags []*Flag, node *Node) error {
 // Resolve walks through the traced path, applying resolvers to any unset flags.
 func (c *Context) Resolve() error {
 	resolvers := c.combineResolvers()
-	if len(resolvers) == 0 {
+	if len(resolvers) == 0 && c.resolveObserver == nil {
 		return nil
 	}
 
@@ -735,6 +743,10 @@ func (c *Context) Resolve() error {
 					continue
 				}
 				selected = s
+			}
+
+			if c.resolveObserver != nil {
+				c.resolveObserver(flag, selected)
 			}
 
 			if selected == nil {

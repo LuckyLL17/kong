@@ -372,6 +372,9 @@ func (k *Kong) applyHook(ctx *Context, name string) error {
 		default:
 			panic("unsupported Path")
 		}
+		if ctx.hookFilter != nil && ctx.hookFilter(trace, name) {
+			continue
+		}
 		for _, method := range k.getMethods(value, name) {
 			binds := k.bindings.clone()
 			binds.add(ctx, trace)
@@ -419,8 +422,11 @@ func (k *Kong) applyHookToDefaultFlags(ctx *Context, node *Node, name string) er
 			if !flag.HasDefault && !atLeastOneEnvSet(flag.Tag.Envs) {
 				continue
 			}
+			path := &Path{Flag: flag}
+			if ctx.hookFilter != nil && ctx.hookFilter(path, name) {
+				continue
+			}
 			for _, method := range getMethods(flag.Target, name) {
-				path := &Path{Flag: flag}
 				if err := callFunction(method, binds.clone().add(path)); err != nil {
 					return next(err)
 				}
