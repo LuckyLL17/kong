@@ -110,6 +110,20 @@ func DynamicCommand(name, help, group string, cmd any, tags ...string) Option {
 	})
 }
 
+// RuntimeCommands enables registration, replacement and unload of plugin
+// commands at runtime through Kong.CommandRegistry().
+//
+// When enabled, every Trace/Parse pins the command-tree version that was
+// current when it started, so in-flight parsing and help output remain
+// consistent while the host mutates the registry concurrently. Static
+// builds that do not enable this option are unaffected.
+func RuntimeCommands() Option {
+	return OptionFunc(func(k *Kong) error {
+		k.runtimeCmds = true
+		return nil
+	})
+}
+
 // NoDefaultHelp disables the default help flags.
 func NoDefaultHelp() Option {
 	return OptionFunc(func(k *Kong) error {

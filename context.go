@@ -93,6 +93,42 @@ type Context struct {
 	resolvers     []Resolver // Extra context-specific resolvers.
 	scan          *Scanner
 	lastWinsPeers map[*Flag][]*Flag // Other members of each flag's lastwins group.
+
+	// snapshotApp is the immutable command-tree version this context traces,
+	// when the runtime command registry is enabled. All parsing, validation,
+	// help output and command discovery use it rather than the live model, so
+	// concurrent commits cannot produce mixed-version paths.
+	snapshotApp *Application
+	// snapshotPin keeps the pinned tree version alive until Release.
+	snapshotPin *versionPin
+}
+
+// appModel returns the command tree this context was started against.
+func (c *Context) appModel() *Application {
+	if c.snapshotApp != nil {
+		return c.snapshotApp
+	}
+	return c.Kong.Model
+}
+
+// Snapshot returns the immutable command-tree snapshot this context is
+// tracing against. When the runtime command registry is not enabled the
+// live parser model is returned.
+func (c *Context) Snapshot() *Application {
+	return c.appModel()
+}
+
+// Release detaches the context from the command-tree snapshot it pinned at
+// trace time. After Release, new registrations may retire commands this
+// context started with; the context itself keeps traversing its private
+// snapshot and remains usable. It is safe to call Release more than once.
+//
+// Run() releases its context automatically.
+func (c *Context) Release() {
+	if c.snapshotPin != nil {
+		c.snapshotPin.release()
+		c.snapshotPin = nil
+	}
 }
 
 // Trace path of "args" through the grammar tree.
@@ -103,18 +139,39 @@ type Context struct {
 // Validate() and Apply().
 func Trace(k *Kong, args []string) (*Context, error) {
 	s := Scan(args...).AllowHyphenPrefixedParameters(k.allowHyphenated)
+
+	var (
+		model *Application
+		pin   *versionPin
+	)
+	if k.cmdRegistry != nil {
+		// Pin the current tree version and parse against a private copy so
+		// concurrent register/unload operations can neither race the parse
+		// nor mix versions into its trace.
+		pin = k.cmdRegistry.acquire()
+		model = k.cmdRegistry.cloneForTrace(pin.v)
+	} else {
+		model = k.Model
+	}
 	c := &Context{
 		Kong: k,
 		Args: args,
 		Path: []*Path{
-			{App: k.Model, Flags: k.Model.Flags, remainder: s.PeekAll()},
+			{App: model, Flags: model.Flags, remainder: s.PeekAll()},
 		},
 		values:        map[*Value]reflect.Value{},
 		scan:          s,
 		bindings:      bindings{},
-		lastWinsPeers: lastWinsPeers(k.Model.Node),
+		lastWinsPeers: lastWinsPeers(model.Node),
+		snapshotApp:   model,
+		snapshotPin:   pin,
 	}
-	c.Error = c.trace(c.Model.Node)
+	if pin == nil {
+		// Without the registry the context aliases the live model directly,
+		// preserving the historical behaviour of Trace on static parsers.
+		c.snapshotApp = nil
+	}
+	c.Error = c.trace(model.Node)
 	if c.Error == nil {
 		c.filterLastWins()
 	}
@@ -330,7 +387,7 @@ func (c *Context) Validate() error { //nolint: gocyclo
 		}
 	}
 	for _, resolver := range c.combineResolvers() {
-		if err := resolver.Validate(c.Model); err != nil {
+		if err := resolver.Validate(c.appModel()); err != nil {
 			return err
 		}
 	}
@@ -355,7 +412,7 @@ func (c *Context) Validate() error { //nolint: gocyclo
 	// Check the terminal node.
 	node := c.Selected()
 	if node == nil {
-		node = c.Model.Node
+		node = c.appModel().Node
 	}
 
 	// Find deepest positional argument so we can check if all required positionals have been provided.
@@ -439,7 +496,7 @@ func (c *Context) FlagValue(flag *Flag) any {
 func (c *Context) Reset() error {
 	selected := c.selectedValues()
 	c.resetErrors = map[*Value]error{}
-	return Visit(c.Model.Node, func(node Visitable, next Next) error {
+	return Visit(c.appModel().Node, func(node Visitable, next Next) error {
 		value, ok := node.(*Value)
 		if !ok {
 			return next(nil)
@@ -791,7 +848,7 @@ func (c *Context) getValue(value *Value) reflect.Value {
 
 // ApplyDefaults if they are not already set.
 func (c *Context) ApplyDefaults() error {
-	return Visit(c.Model.Node, func(node Visitable, next Next) error {
+	return Visit(c.appModel().Node, func(node Visitable, next Next) error {
 		var value *Value
 		switch node := node.(type) {
 		case *Flag:
@@ -996,6 +1053,9 @@ func (c *Context) Run(binds ...any) (err error) {
 	}
 	runErr := c.RunNode(node, binds...)
 	err = c.Kong.applyHook(c, "AfterRun")
+	// Execution has completed: the pinned command-tree snapshot may now be
+	// retired even though the Context itself remains usable for inspection.
+	c.Release()
 	return errors.Join(runErr, err)
 }
 

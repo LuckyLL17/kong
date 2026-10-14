@@ -113,7 +113,7 @@ func DefaultHelpValueFormatter(value *Value) string {
 func DefaultShortHelpPrinter(options HelpOptions, ctx *Context) error {
 	w := newHelpWriter(ctx, options)
 	cmd := ctx.Selected()
-	app := ctx.Model
+	app := ctx.appModel()
 	if cmd == nil {
 		w.Printf("Usage: %s%s", app.Name, app.Summary())
 		w.Printf(`Run "%s --help" for more information.`, app.Name)
@@ -131,10 +131,11 @@ func DefaultHelpPrinter(options HelpOptions, ctx *Context) error {
 	}
 	w := newHelpWriter(ctx, options)
 	selected := ctx.Selected()
+	app := ctx.appModel()
 	if selected == nil {
-		printApp(w, ctx.Model)
+		printApp(w, app)
 	} else {
-		printCommand(w, ctx.Model, selected)
+		printCommand(w, app, selected)
 	}
 	return w.Write(ctx.Stdout)
 }

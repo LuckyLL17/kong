@@ -10,6 +10,7 @@ func ApplyDefaults(target any, options ...Option) error {
 	if err != nil {
 		return err
 	}
+	defer ctx.Release()
 	err = ctx.Resolve()
 	if err != nil {
 		return err

@@ -57,6 +57,14 @@ type Node struct {
 	Active      bool // Denotes the node is part of an active branch in the CLI.
 
 	Argument *Value // Populated when Type is ArgumentNode.
+
+	// registryID is the stable identity key ("owner\x00id") of the runtime
+	// registration that mounted this subtree. Empty for static nodes and
+	// commands created via the DynamicCommand option.
+	registryID string
+	// legacyDynamic marks commands created via the DynamicCommand option.
+	// They are protected from runtime replacement and unload.
+	legacyDynamic bool
 }
 
 func (*Node) node() {}

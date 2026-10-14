@@ -73,6 +73,9 @@ type Kong struct {
 	embedded         []embedded
 	dynamicCommands  []*dynamicCommand
 
+	runtimeCmds bool
+	cmdRegistry *CommandRegistry
+
 	hooks map[string][]reflect.Value
 }
 
@@ -156,6 +159,9 @@ func New(grammar any, options ...Option) (*Kong, error) {
 		if err != nil {
 			return nil, err
 		}
+		if len(k.Model.Children) > 0 {
+			k.Model.Children[len(k.Model.Children)-1].legacyDynamic = true
+		}
 	}
 
 	for _, option := range k.postBuildOptions {
@@ -175,7 +181,18 @@ func New(grammar any, options ...Option) (*Kong, error) {
 		return nil, err
 	}
 
+	if k.runtimeCmds {
+		k.cmdRegistry = newCommandRegistry(k)
+		k.cmdRegistry.initialize()
+	}
+
 	return k, nil
+}
+
+// CommandRegistry returns the runtime command registry enabled with the
+// RuntimeCommands() option, or nil when runtime commands are not enabled.
+func (k *Kong) CommandRegistry() *CommandRegistry {
+	return k.cmdRegistry
 }
 
 func checkOverlappingXorAnd(k *Kong) error {
