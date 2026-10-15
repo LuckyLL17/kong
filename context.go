@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,6 +103,9 @@ type Context struct {
 // This just constructs a new trace. To fully apply the trace you must call Reset(), Resolve(),
 // Validate() and Apply().
 func Trace(k *Kong, args []string) (*Context, error) {
+	// Keep allocations private to an isolated Session reachable for the
+	// lifetime of the returned Context.
+	runtime.KeepAlive(k.sessionKeep)
 	s := Scan(args...).AllowHyphenPrefixedParameters(k.allowHyphenated)
 	c := &Context{
 		Kong: k,

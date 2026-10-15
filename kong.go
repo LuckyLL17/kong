@@ -74,6 +74,12 @@ type Kong struct {
 	dynamicCommands  []*dynamicCommand
 
 	hooks map[string][]reflect.Value
+
+	// sessionKeep anchors allocations owned exclusively by an isolated
+	// Session (copies of embedded/dynamic command structs and the help
+	// flag target). Nil for parsers created with New; the values are
+	// otherwise reachable only through reflect.Value, which the GC ignores.
+	sessionKeep []any
 }
 
 // New creates a new Kong parser on grammar.
